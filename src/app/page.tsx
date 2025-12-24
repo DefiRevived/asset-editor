@@ -2,8 +2,10 @@
 
 import { useState, useCallback, useMemo } from "react"
 import { VoxelPreview3D } from "@/components/previews/voxel-preview"
+import { AnimatedVoxelPreview } from "@/components/previews/animated-voxel-preview"
 import { VoxelEditor, VoxelBox, VoxelModel } from "@/components/voxel-editor"
 import { useVoxelStore, useSelectedAsset, AssetType } from "@/stores/voxel-store"
+import { AnimationClip, ANIMATION_PRESETS, exportAnimationClip, detectModelType, getRecommendedAnimations, getModelGroups, validateAnimationGroups, ModelType, generateDynamicAnimations } from "@/lib/animation"
 import { 
   Box, 
   Plus, 
@@ -20,7 +22,10 @@ import {
   Search,
   ChevronRight,
   Folder,
-  Sun
+  Sun,
+  Play,
+  Pause,
+  Film
 } from "lucide-react"
 
 // Import all templates
@@ -84,6 +89,9 @@ import {
   PIPE_COLORS,
   VENT_COLORS,
 } from "@/voxel-templates/props"
+
+// Import baking utilities
+import { bakeVoxelModel, generateBakedGameCode, exportBakedModelJSON } from "@/lib/bake-lighting"
 
 // Helper to convert EnemyColors to template colors format
 function toTemplateColors(c: EnemyColors) {
@@ -262,7 +270,6 @@ function GameCodeExportDialog({ onClose }: { onClose: () => void }) {
     if (!asset) return ""
     
     if (exportMode === "baked") {
-      const { bakeVoxelModel, generateBakedGameCode } = require("@/lib/bake-lighting")
       const bakedModel = bakeVoxelModel(
         asset.voxelModel, 
         asset.primaryColor, 
@@ -272,7 +279,6 @@ function GameCodeExportDialog({ onClose }: { onClose: () => void }) {
       )
       return generateBakedGameCode(bakedModel, asset.name.replace(/\s+/g, ""))
     } else if (exportMode === "json") {
-      const { bakeVoxelModel, exportBakedModelJSON } = require("@/lib/bake-lighting")
       const bakedModel = bakeVoxelModel(
         asset.voxelModel, 
         asset.primaryColor, 
@@ -400,6 +406,310 @@ function GameCodeExportDialog({ onClose }: { onClose: () => void }) {
           <button onClick={onClose} className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded text-white">
             Close
           </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// Animation Editor Dialog
+function AnimationEditorDialog({ onClose }: { onClose: () => void }) {
+  const asset = useSelectedAsset()
+  const [selectedPreset, setSelectedPreset] = useState<string | null>("idle")
+  const [isPlaying, setIsPlaying] = useState(true)
+  const [playbackSpeed, setPlaybackSpeed] = useState(1)
+  const [copied, setCopied] = useState(false)
+  const [useDynamic, setUseDynamic] = useState(true) // Default to dynamic animations
+  
+  // Detect model type and get groups
+  const modelType: ModelType = asset ? detectModelType(asset.voxelModel) : "generic"
+  const modelGroups = asset ? getModelGroups(asset.voxelModel) : []
+  
+  // Generate dynamic animations for this model's groups
+  const dynamicAnimations = useMemo(() => {
+    if (!asset || modelGroups.length === 0) return {}
+    return generateDynamicAnimations(modelGroups)
+  }, [asset, modelGroups])
+  
+  // Get available animation names
+  const dynamicAnimNames = Object.keys(dynamicAnimations)
+  const staticPresetNames = Object.keys(ANIMATION_PRESETS)
+  const animationsToShow = useDynamic ? dynamicAnimNames : staticPresetNames
+  
+  // Current animation (dynamic or static)
+  const currentAnimation = useMemo(() => {
+    if (!selectedPreset) return null
+    if (useDynamic && dynamicAnimations[selectedPreset]) {
+      return dynamicAnimations[selectedPreset]
+    }
+    const presetFn = ANIMATION_PRESETS[selectedPreset]
+    return presetFn ? presetFn() : null
+  }, [selectedPreset, useDynamic, dynamicAnimations])
+  
+  // Validate current animation groups
+  const missingGroups = currentAnimation && asset 
+    ? validateAnimationGroups(currentAnimation, asset.voxelModel)
+    : []
+  
+  // Groups that ARE animated
+  const animatedGroups = useMemo(() => {
+    if (!currentAnimation) return new Set<string>()
+    const groups = new Set<string>()
+    for (const kf of currentAnimation.keyframes) {
+      for (const g of kf.groups) groups.add(g)
+    }
+    return groups
+  }, [currentAnimation])
+  
+  const handlePresetSelect = (presetName: string) => {
+    setSelectedPreset(presetName)
+  }
+  
+  const copyAnimation = useCallback(() => {
+    if (!currentAnimation) return
+    navigator.clipboard.writeText(exportAnimationClip(currentAnimation))
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
+  }, [currentAnimation])
+  
+  if (!asset) {
+    return (
+      <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50">
+        <div className="bg-gray-900 border border-cyan-500/30 rounded-lg p-6">
+          <p className="text-gray-400">Select an asset to animate</p>
+          <button onClick={onClose} className="mt-4 px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded text-white">
+            Close
+          </button>
+        </div>
+      </div>
+    )
+  }
+  
+  return (
+    <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50">
+      <div className="bg-gray-900 border border-purple-500/30 rounded-lg w-[1100px] h-[700px] flex flex-col">
+        {/* Header */}
+        <div className="flex items-center justify-between p-4 border-b border-gray-800">
+          <h2 className="text-lg font-bold text-purple-400 flex items-center gap-2">
+            <Film className="w-5 h-5" />
+            Animation Editor - {asset.name}
+          </h2>
+          <button onClick={onClose} className="text-gray-400 hover:text-white text-xl">×</button>
+        </div>
+        
+        <div className="flex-1 flex overflow-hidden">
+          {/* Left panel - Animation presets */}
+          <div className="w-64 border-r border-gray-800 p-4 overflow-y-auto">
+            {/* Model Info */}
+            <div className="mb-4 p-3 bg-gray-800/50 rounded border border-gray-700">
+              <h4 className="text-xs font-semibold text-purple-400 mb-2">Model Type</h4>
+              <p className="text-sm text-white capitalize">{modelType}</p>
+              <h4 className="text-xs font-semibold text-gray-400 mt-3 mb-1">Groups ({modelGroups.length})</h4>
+              <div className="flex flex-wrap gap-1">
+                {modelGroups.length > 0 ? modelGroups.map(g => (
+                  <span 
+                    key={g} 
+                    className={`px-1.5 py-0.5 text-xs rounded ${
+                      animatedGroups.has(g) 
+                        ? "bg-green-600/50 text-green-300 border border-green-500/30" 
+                        : "bg-gray-700 text-gray-400"
+                    }`}
+                  >
+                    {g}
+                  </span>
+                )) : (
+                  <span className="text-xs text-gray-500">No groups defined</span>
+                )}
+              </div>
+              {modelGroups.length > 0 && (
+                <p className="text-xs text-gray-500 mt-2">
+                  <span className="text-green-400">{animatedGroups.size}</span>/{modelGroups.length} groups animated
+                </p>
+              )}
+            </div>
+            
+            {/* Dynamic vs Static toggle */}
+            <div className="mb-4 p-2 bg-gray-800/50 rounded border border-gray-700">
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setUseDynamic(true)}
+                  className={`flex-1 px-2 py-1.5 text-xs rounded transition-colors ${
+                    useDynamic 
+                      ? "bg-green-600 text-white" 
+                      : "bg-gray-700 text-gray-400 hover:bg-gray-600"
+                  }`}
+                >
+                  Dynamic
+                </button>
+                <button
+                  onClick={() => setUseDynamic(false)}
+                  className={`flex-1 px-2 py-1.5 text-xs rounded transition-colors ${
+                    !useDynamic 
+                      ? "bg-purple-600 text-white" 
+                      : "bg-gray-700 text-gray-400 hover:bg-gray-600"
+                  }`}
+                >
+                  Static Presets
+                </button>
+              </div>
+              <p className="text-xs text-gray-500 mt-2 text-center">
+                {useDynamic ? "Adapts to model groups" : "Fixed preset animations"}
+              </p>
+            </div>
+            
+            <h3 className="text-sm font-semibold text-gray-400 mb-2">
+              {useDynamic ? "Dynamic Animations" : "Static Presets"}
+            </h3>
+            
+            <div className="space-y-1">
+              {animationsToShow.map(name => {
+                const anim = useDynamic ? dynamicAnimations[name] : (ANIMATION_PRESETS[name] ? ANIMATION_PRESETS[name]() : null)
+                if (!anim) return null
+                return (
+                  <button
+                    key={name}
+                    onClick={() => handlePresetSelect(name)}
+                    className={`w-full text-left px-3 py-2 rounded text-sm transition-colors ${
+                      selectedPreset === name 
+                        ? "bg-purple-600 text-white" 
+                        : "text-gray-300 hover:bg-gray-800"
+                    }`}
+                  >
+                    {anim.name}
+                    {useDynamic && (
+                      <span className="ml-2 text-xs text-green-400">✓ all groups</span>
+                    )}
+                  </button>
+                )
+              })}
+            </div>
+            
+            {/* Animation info */}
+            {currentAnimation && (
+              <div className="mt-6 p-3 bg-gray-800/50 rounded border border-gray-700">
+                <h4 className="text-xs font-semibold text-gray-400 mb-2">Current Animation</h4>
+                <p className="text-sm text-white">{currentAnimation.name}</p>
+                <p className="text-xs text-gray-400 mt-1">
+                  Duration: {currentAnimation.duration}s
+                </p>
+                <p className="text-xs text-gray-400">
+                  Keyframes: {currentAnimation.keyframes.length}
+                </p>
+                <p className="text-xs text-gray-400">
+                  Loop: {currentAnimation.loop ? "Yes" : "No"}
+                </p>
+                
+                {/* Warning for missing groups */}
+                {missingGroups.length > 0 && (
+                  <div className="mt-2 p-2 bg-yellow-900/30 border border-yellow-600/50 rounded">
+                    <p className="text-xs text-yellow-400">⚠️ Missing groups:</p>
+                    <div className="flex flex-wrap gap-1 mt-1">
+                      {missingGroups.map(g => (
+                        <span key={g} className="px-1.5 py-0.5 bg-yellow-900/50 text-xs text-yellow-300 rounded">{g}</span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+          
+          {/* Center - Preview */}
+          <div className="flex-1 flex flex-col">
+            <div className="flex-1 p-4">
+              <AnimatedVoxelPreview
+                voxelModel={asset.voxelModel}
+                primaryColor={asset.primaryColor}
+                secondaryColor={asset.secondaryColor}
+                glowColor={asset.glowColor}
+                animation={currentAnimation}
+                isPlaying={isPlaying}
+                playbackSpeed={playbackSpeed}
+                showGrid={true}
+              />
+            </div>
+            
+            {/* Playback controls */}
+            <div className="p-4 border-t border-gray-800 flex items-center gap-4">
+              <button
+                onClick={() => setIsPlaying(!isPlaying)}
+                className={`p-2 rounded ${isPlaying ? "bg-orange-600" : "bg-green-600"} text-white`}
+              >
+                {isPlaying ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5" />}
+              </button>
+              
+              <div className="flex items-center gap-2">
+                <span className="text-sm text-gray-400">Speed:</span>
+                {[0.25, 0.5, 1, 2].map(speed => (
+                  <button
+                    key={speed}
+                    onClick={() => setPlaybackSpeed(speed)}
+                    className={`px-2 py-1 text-xs rounded ${
+                      playbackSpeed === speed 
+                        ? "bg-purple-600 text-white" 
+                        : "bg-gray-700 text-gray-300 hover:bg-gray-600"
+                    }`}
+                  >
+                    {speed}x
+                  </button>
+                ))}
+              </div>
+              
+              <div className="flex-1" />
+              
+              <button
+                onClick={copyAnimation}
+                className="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 rounded text-white text-sm flex items-center gap-2"
+              >
+                <Copy className="w-4 h-4" />
+                {copied ? "Copied!" : "Copy Animation JSON"}
+              </button>
+            </div>
+          </div>
+          
+          {/* Right panel - Keyframe list */}
+          <div className="w-72 border-l border-gray-800 p-4 overflow-y-auto">
+            <h3 className="text-sm font-semibold text-gray-400 mb-3">Keyframes</h3>
+            {currentAnimation?.keyframes.length === 0 ? (
+              <p className="text-xs text-gray-500">No keyframes</p>
+            ) : (
+              <div className="space-y-2">
+                {currentAnimation?.keyframes.map((kf, idx) => (
+                  <div key={idx} className="p-2 bg-gray-800/50 rounded border border-gray-700 text-xs">
+                    <div className="flex justify-between text-gray-300">
+                      <span>Time: {kf.time.toFixed(2)}s</span>
+                      <span className="text-purple-400">{kf.easing}</span>
+                    </div>
+                    <div className="text-gray-400 mt-1">
+                      Groups: {kf.groups.length > 0 ? kf.groups.join(", ") : "all"}
+                    </div>
+                    {kf.transform.position && (
+                      <div className="text-gray-500">
+                        Pos: [{kf.transform.position.map(v => v.toFixed(2)).join(", ")}]
+                      </div>
+                    )}
+                    {kf.transform.rotation && (
+                      <div className="text-gray-500">
+                        Rot: [{kf.transform.rotation.map(v => v.toFixed(2)).join(", ")}]
+                      </div>
+                    )}
+                    {kf.transform.scale && (
+                      <div className="text-gray-500">
+                        Scale: [{kf.transform.scale.map(v => v.toFixed(2)).join(", ")}]
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+            
+            <div className="mt-4 p-3 bg-gray-800/30 rounded border border-gray-700">
+              <p className="text-xs text-gray-500">
+                💡 Tip: Animations transform groups like &quot;body&quot;, &quot;head&quot;, &quot;arm_left&quot;, etc.
+                Make sure your voxel model uses these group names.
+              </p>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -845,9 +1155,9 @@ export default function VoxelEditorPage() {
     deleteAsset,
     updateAssetColors,
     updateVoxel,
-    addVoxel,
-    deleteVoxel,
-    duplicateVoxel,
+    addVoxel: _addVoxel,
+    deleteVoxel: _deleteVoxel,
+    duplicateVoxel: _duplicateVoxel,
     addGroup,
     toggleGrid,
     toggleAxes,
@@ -858,12 +1168,16 @@ export default function VoxelEditorPage() {
     importAssets
   } = useVoxelStore()
   
+  // Silence unused variable warnings (used in advanced editing)
+  void _addVoxel; void _deleteVoxel; void _duplicateVoxel;
+  
   const selectedAsset = useSelectedAsset()
   
   const [showNewDialog, setShowNewDialog] = useState(false)
   const [showExportDialog, setShowExportDialog] = useState(false)
   const [showGameCodeDialog, setShowGameCodeDialog] = useState(false)
   const [showTemplateBrowser, setShowTemplateBrowser] = useState(false)
+  const [showAnimationEditor, setShowAnimationEditor] = useState(false)
   const [exportCode, setExportCode] = useState("")
   
   // Handle file import
@@ -967,7 +1281,16 @@ export default function VoxelEditorPage() {
             className="flex items-center gap-2 px-3 py-1.5 bg-purple-700 hover:bg-purple-600 disabled:opacity-50 disabled:cursor-not-allowed rounded text-sm"
           >
             <FileCode className="w-4 h-4" />
-            Export Game Code
+            Export Code
+          </button>
+          
+          <button
+            onClick={() => setShowAnimationEditor(true)}
+            disabled={!selectedAsset}
+            className="flex items-center gap-2 px-3 py-1.5 bg-orange-700 hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed rounded text-sm"
+          >
+            <Film className="w-4 h-4" />
+            Animate
           </button>
         </div>
       </header>
@@ -1145,6 +1468,12 @@ export default function VoxelEditorPage() {
       {showGameCodeDialog && (
         <GameCodeExportDialog
           onClose={() => setShowGameCodeDialog(false)}
+        />
+      )}
+      
+      {showAnimationEditor && (
+        <AnimationEditorDialog
+          onClose={() => setShowAnimationEditor(false)}
         />
       )}
       
